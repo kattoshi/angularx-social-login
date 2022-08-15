@@ -16,10 +16,19 @@ export interface GoogleInitOptions {
    * This attribute sets the DOM ID of the container element. If it's not set, the One Tap prompt is displayed in the top-right corner of the window.
    */
   prompt_parent_id?: string;
+
+  /**
+   * Use Code Model
+   * Default : Token Model
+   * https://developers.google.com/identity/oauth2/web/guides/use-code-model
+   */
+  useCodeModel? : boolean;
+  redirectUri? : string;
 }
 
 const defaultInitOptions: GoogleInitOptions = {
   oneTapEnabled: true,
+  useCodeModel: false,
 };
 
 export class GoogleLoginProvider extends BaseLoginProvider {
@@ -31,6 +40,7 @@ export class GoogleLoginProvider extends BaseLoginProvider {
   private readonly _accessToken = new BehaviorSubject<string | null>(null);
   private readonly _receivedAccessToken = new EventEmitter<string>();
   private _tokenClient: google.accounts.oauth2.TokenClient | undefined;
+  private _codeClient: google.accounts.oauth2.CodeClient | undefined;
 
   constructor(
     private clientId: string,
@@ -76,22 +86,36 @@ export class GoogleLoginProvider extends BaseLoginProvider {
                   ? this.initOptions.scopes.filter((s) => s).join(' ')
                   : this.initOptions.scopes;
 
-              this._tokenClient = google.accounts.oauth2.initTokenClient({
-                client_id: this.clientId,
-                scope,
-                callback: (tokenResponse) => {
-                  if (tokenResponse.error) {
-                    this._accessToken.error({
-                      code: tokenResponse.error,
-                      description: tokenResponse.error_description,
-                      uri: tokenResponse.error_uri,
-                    });
-                  } else {
-                    this._accessToken.next(tokenResponse.access_token);
-                  }
-                },
-              });
+              if (this.initOptions.useCodeModel) {
+                // create state cose
+                const state = Math.random().toString(32).substring(2);
+                sessionStorage.setItem('google-auth-state', state);
+
+                this._codeClient = google.accounts.oauth2.initCodeClient({
+                  client_id: this.clientId,
+                  scope,
+                  ux_mode : 'redirect',
+                  redirect_uri : this.initOptions.redirectUri,
+                  state : state
+                });
+              } else {
+                this._tokenClient = google.accounts.oauth2.initTokenClient({
+                  client_id: this.clientId,
+                  scope,
+                  callback: (tokenResponse) => {
+                    if (tokenResponse.error) {
+                      this._accessToken.error({
+                        code: tokenResponse.error,
+                        description: tokenResponse.error_description,
+                        uri: tokenResponse.error_uri,
+                      });
+                    } else {
+                      this._accessToken.next(tokenResponse.access_token);
+                    }
+                  },
+                });
             }
+          }
 
             resolve();
           }
@@ -125,19 +149,33 @@ export class GoogleLoginProvider extends BaseLoginProvider {
 
   getAccessToken(): Promise<string> {
     return new Promise((resolve, reject) => {
-      if (!this._tokenClient) {
-        if (this._socialUser.value) {
-          reject(
-            'No token client was instantiated, you should specify some scopes.'
-          );
+      if (this.initOptions.useCodeModel) {
+        if (!this._codeClient) {
+          if (this._socialUser.value) {
+            reject(
+              'No token client was instantiated, you should specify some scopes.'
+            );
+          } else {
+            reject('You should be logged-in first.');
+          }
         } else {
-          reject('You should be logged-in first.');
+          this._codeClient.requestCode();
         }
       } else {
-        this._tokenClient.requestAccessToken({
-          hint: this._socialUser.value?.email,
-        });
-        this._receivedAccessToken.pipe(take(1)).subscribe(resolve);
+        if (!this._tokenClient) {
+          if (this._socialUser.value) {
+            reject(
+              'No token client was instantiated, you should specify some scopes.'
+            );
+          } else {
+            reject('You should be logged-in first.');
+          }
+        } else {
+          this._tokenClient.requestAccessToken({
+            hint: this._socialUser.value?.email,
+          });
+          this._receivedAccessToken.pipe(take(1)).subscribe(resolve);
+        }
       }
     });
   }
